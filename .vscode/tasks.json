@@ -1,0 +1,27 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build CUDA program with Windows API",
+            "type": "shell",
+            "command": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe",
+            "args": [
+                "-gencode", "arch=compute_60,code=sm_60",
+                "-gencode", "arch=compute_80,code=sm_80",
+                "-o", "main.exe",
+                "main.cu",
+                "winlib.cpp",  // Add this to compile SimpleWin.cpp
+                "-Xcompiler", "/MD",
+                "-luser32",
+                "-lgdi32",
+                "-lkernel32"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Compiling CUDA program with Windows API"
+        }
+    ]
+}
