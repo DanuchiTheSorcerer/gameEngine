@@ -1,1 +1,1 @@
-First look at CUDA (and C/C++)
+Game engine using Win32 and CUDA
