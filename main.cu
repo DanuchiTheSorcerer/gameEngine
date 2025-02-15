@@ -5,9 +5,11 @@
 #include <chrono>
 #include <string>
 
-const int WIDTH = 800;
-const int HEIGHT = 600;
-const int BUFFER_COUNT = 3;
+
+
+int WIDTH = 1000;
+int HEIGHT = 1000;
+const int BUFFER_COUNT = 2;
 
 uint32_t* gpu_buffers[BUFFER_COUNT];  // Framebuffers on GPU
 uint32_t* cpu_buffers[BUFFER_COUNT];  // CPU-accessible buffers
@@ -18,13 +20,13 @@ BITMAPINFO bmi;
 HDC hdcMem;
 
 // CUDA kernel to fill the framebuffer
-__global__ void renderKernel(uint32_t* framebuffer, int width, int height, int frameCount) {
+__global__ void renderKernel(uint32_t* framebuffer, int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x < width && y < height) {
         int index = y * width + x;
-        framebuffer[index] = 0xFF000000 | ((x + frameCount) % 255) << 16 | ((y + frameCount) % 255) << 8 | 255;
+        framebuffer[index] = 0xFF000000 | ((x) % 255) << 16 | ((-y) % 255) << 8 | (x+y)%255;
     }
 }
 
@@ -38,20 +40,19 @@ void InitCUDA() {
 }
 
 // Function to render a frame
-void RenderFrame(int frameCount) {
+void RenderFrame() {
     int nextBuffer = (currentBuffer + 1) % BUFFER_COUNT;
 
     // Launch CUDA kernel
     dim3 threadsPerBlock(16, 16);
     dim3 numBlocks((WIDTH + 15) / 16, (HEIGHT + 15) / 16);
-    renderKernel<<<numBlocks, threadsPerBlock>>>(gpu_buffers[nextBuffer], WIDTH, HEIGHT, frameCount);
+    renderKernel<<<numBlocks, threadsPerBlock>>>(gpu_buffers[nextBuffer], WIDTH, HEIGHT);
     cudaEventRecord(frameReady[nextBuffer]);  // Signal completion
 
     // Wait for previous frame to be ready before copying
     cudaEventSynchronize(frameReady[currentBuffer]);
     cudaMemcpyAsync(cpu_buffers[currentBuffer], gpu_buffers[currentBuffer], WIDTH * HEIGHT * sizeof(uint32_t), cudaMemcpyDeviceToHost);
 
-    // Invalidate the window to trigger WM_PAINT
 }
 
 // Function to display the framebuffer in WM_PAINT
@@ -62,6 +63,11 @@ void PaintWindow(HDC hdc) {
 
 // Win32 message loop with rendering
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    DEVMODE dm;
+    memset(&dm, 0, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    EnumDisplaySettings(nullptr, ENUM_CURRENT_SETTINGS, &dm);
+
     // Initialize window using winlib
     WinLib_Init(hInstance);
     WinWindow* myWindow = WinLib_CreateWindow("My Win32 Window", WIDTH, HEIGHT, hInstance);
@@ -82,16 +88,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     hdcMem = CreateCompatibleDC(hdc);
     ReleaseDC(myWindow->hwnd, hdc);
 
+    
+    std::string refreshRateStr = "Refresh rate: " + std::to_string(dm.dmDisplayFrequency) + " Hz \n";
+    OutputDebugString(refreshRateStr.c_str());
+
     int frameCount = 0;
     int frameCheck = 0;
     auto lastFrameTime = std::chrono::steady_clock::now();
+    auto tickStartTime = std::chrono::high_resolution_clock::now();
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         // Process Windows messages
         TranslateMessage(&msg);
         DispatchMessage(&msg);
 
-        // Calculate time since last frame
+        // fps calculation
         auto currentFrameTime = std::chrono::steady_clock::now();
         std::chrono::duration<float> deltaTime = currentFrameTime - lastFrameTime;
         if (deltaTime.count() > 1) {
@@ -100,9 +111,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             frameCheck = 0;
             lastFrameTime = currentFrameTime;
         }
-        // Render frame
-        RenderFrame(frameCount++);
+        RenderFrame();
+        frameCount++;
         frameCheck++;
+        
+        std::chrono::duration<float> timeInTick = std::chrono::high_resolution_clock::now() - tickStartTime;
+        if (timeInTick.count() > 1.0f / 60.0f) {
+            tickStartTime = std::chrono::high_resolution_clock::now();
+        }
 
         // Request a repaint AFTER processing events
         InvalidateRect(myWindow->hwnd, NULL, FALSE);
