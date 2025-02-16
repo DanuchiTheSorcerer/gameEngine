@@ -2,16 +2,18 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build CUDA program with Windows API",
+            "label": "Build CUDA Program",
             "type": "shell",
-            "command": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe",
+            "command": "nvcc",
             "args": [
-                "-gencode", "arch=compute_60,code=sm_60",
-                "-gencode", "arch=compute_80,code=sm_80",
+                "-gencode", "arch=compute_86,code=sm_86",
+                "-rdc=true",
                 "-o", "main.exe",
                 "main.cu",
-                "winlib.cpp",  // Add this to compile SimpleWin.cpp
+                "winlib.cpp",
                 "-Xcompiler", "/MD",
+                "-Xlinker", "/NODEFAULTLIB:LIBCMT",
+                "-lcudadevrt",
                 "-luser32",
                 "-lgdi32",
                 "-lkernel32"
@@ -21,7 +23,7 @@
                 "isDefault": true
             },
             "problemMatcher": [],
-            "detail": "Compiling CUDA program with Windows API"
+            "detail": "CUDA Build for RTX 3050"
         }
     ]
 }
