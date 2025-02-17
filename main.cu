@@ -10,6 +10,8 @@ float targetTPS = 60;
 int refreshRate;
 BITMAPINFO bmi;
 int activeDisplayBufferIndex = 0;
+int currentActiveInterpolator = 0; //cpu side
+cudaEvent_t frameCopyEvent;
 
 struct frameBuffer {
     int state = 0; // 0 is untouched  1 is being worked on   2 is being copied (or has been copied if on DRAM)
@@ -64,6 +66,8 @@ void initAll(HINSTANCE hInstance) {
     }
 
     cudaMemcpy(gpuMetaData,&initialData,sizeof(gpuMeta), cudaMemcpyHostToDevice);
+
+    cudaEventCreate(&frameCopyEvent);
 }
 
 void PaintWindow(HDC hdc) {
@@ -71,7 +75,7 @@ void PaintWindow(HDC hdc) {
     StretchDIBits(hdc, 0, 0, width, height, 0, 0, width, height,displayBuffers[activeDisplayBufferIndex].pixels, &bmi,DIB_RGB_COLORS, SRCCOPY);
 }
 
-__global__ void computeFrame(uint32_t** buffer, interpolator* interpolator,int width,int height) { //pointer to buffer
+__global__ void computeFrame(uint32_t* buffer, interpolator* interpolator,int width,int height) { //pointer to buffer
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -79,7 +83,7 @@ __global__ void computeFrame(uint32_t** buffer, interpolator* interpolator,int w
 
     const int idx = y * width + x;
 
-    (*buffer)[idx] = 0xFF000000 | 
+    buffer[idx] = 0xFF000000 | 
         ((x + interpolator->tickCount) % 255) << 16 |
         ((y + interpolator->tickCount) % 255) << 8 |
         ((x + y + interpolator->tickCount) % 255);
@@ -105,7 +109,7 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
 
             updatedBufferIndex = gpuMetaData->bufferRecencyOrder[2];
             gpuMetaData->buffers[updatedBufferIndex].state = 1;
-            computeFrame<<<numBlocks,threadsPerBlock>>>(&gpuMetaData->buffers[updatedBufferIndex].pixels,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width,height);
+            computeFrame<<<numBlocks,threadsPerBlock>>>(gpuMetaData->buffers[updatedBufferIndex].pixels,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width,height);
 
             gpuMetaData->buffers[updatedBufferIndex].state = 0;
 
@@ -113,7 +117,7 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
 
             updatedBufferIndex = gpuMetaData->bufferRecencyOrder[1];
             gpuMetaData->buffers[updatedBufferIndex].state = 1;
-            computeFrame<<<numBlocks,threadsPerBlock>>>(&gpuMetaData->buffers[updatedBufferIndex].pixels,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width,height);
+            computeFrame<<<numBlocks,threadsPerBlock>>>(gpuMetaData->buffers[updatedBufferIndex].pixels,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width,height);
             gpuMetaData->buffers[updatedBufferIndex].state = 0;
 
         }
@@ -146,7 +150,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     auto lastDisplayTime = std::chrono::high_resolution_clock::now();
     int tickCount = 0;
     MSG msg;
+    //main loop
     while (GetMessage(&msg,NULL,0,0)) {
+        OutputDebugString("Hello\n");
         TranslateMessage(&msg);
         DispatchMessage(&msg);
 
@@ -156,43 +162,79 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         
         //if it is time for a new tick, than run it
         if (timeSinceTick.count() > 1.0f/targetTPS) {
+            OutputDebugString("Logician\n");
             //game logic
 
             tickCount++;
             //update interpolator
             interpolator newInterpolator;
             newInterpolator.tickCount = tickCount;
-            if (!gpuMetaData->shouldSwitchInterpolator) { // if the gpu hasn't gotten around to the last switch yet, dont update (overload gpu = bad)
-                //cuda copy command
 
-                //cuda set shouldSwitchInterpolator command
+            // Determine the inactive interpolator slot.
+            int inactiveIndex = 1 - currentActiveInterpolator;
+            
+            // Asynchronously copy the new interpolator data to the inactive slot on the GPU.
+            cudaMemcpyAsync(&gpuMetaData->interpolators[inactiveIndex], &newInterpolator,sizeof(interpolator),cudaMemcpyHostToDevice,stream);
+            
+            // Set the flag so the GPU will switch to the new interpolator on its next frame.
+            bool switchFlag = true;
+            cudaMemcpyAsync(&gpuMetaData->shouldSwitchInterpolator, &switchFlag , sizeof(bool) , cudaMemcpyHostToDevice, stream);
+            
+            cudaStreamSynchronize(stream);                
+            // Update our CPU-side record of the active slot.
+            // The GPU will switch to 'inactiveIndex' upon processing the flag.
+            currentActiveInterpolator = inactiveIndex;
 
-                if (tickCount == 1) { // start up the frame calculations after the first interpolator is made
-                    frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream);
-
-                }
+            if (tickCount == 1) { // start up the frame calculations after the first interpolator is made
+                frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream);
             }
             lastTickTime = now;
         }
 
         //if it is time for a new image to be displayed, do so
-        if (timeSinceDisplay.count() > 1.0f/refreshRate) {
-            //cuda copy frame command
-            //copy from gpuMetaData->buffers[gpuMetaData->bufferRecencyOrder[0]]  to     displayBuffers[(activeDisplayBufferIndex + 1) % 3]
-
-            //update activeDisplayBufferIndex
-            activeDisplayBufferIndex = (activeDisplayBufferIndex + 1) % 3;
-            //request a repaint by windows
-            InvalidateRect(window->hwnd,NULL,FALSE);
+        if (timeSinceDisplay.count() > 1.0f / refreshRate) {
+            OutputDebugString("Display\n");
             lastDisplayTime = now;
+        
+            // Determine target display buffer
+            int targetBuffer = (activeDisplayBufferIndex + 1) % 3;
+        
+            // Get the latest buffer index from device
+            int latestBufferIndex;
+            cudaMemcpyAsync(&latestBufferIndex, &gpuMetaData->bufferRecencyOrder[0], sizeof(int), cudaMemcpyDeviceToHost, stream);
+            OutputDebugString("Hello chester?\n");
+            
+            // Ensure latestBufferIndex is ready
+            cudaStreamSynchronize(stream);
+            OutputDebugString("nah\n");
+        
+            // Copy from device to host asynchronously
+            uint32_t** src = &gpuMetaData->buffers[latestBufferIndex].pixels;
+            OutputDebugString("Hewwwwwwlo\n");
+            uint32_t** dst = &displayBuffers[targetBuffer].pixels;
+            OutputDebugString("cwinge\n");
+
+            cudaMemcpyAsync(dst, src, width * height * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+        
+            // Record event after copy
+            cudaEventRecord(frameCopyEvent, stream);
+            OutputDebugString("whoat\n");
+        
+            // Launch callback when copy is done
+            cudaLaunchHostFunc(stream, [](void* data) {
+                WinWindow* window = static_cast<WinWindow*>(data);
+                activeDisplayBufferIndex = (activeDisplayBufferIndex + 1) % 3;
+                InvalidateRect(window->hwnd, NULL, FALSE);
+            }, window);
         }
     }
 
-    
+    //memory cleanup
     WinLib_DestroyWindow(window);
     bool endKernel = true;
     cudaMemcpyAsync(&gpuMetaData->shouldEndKernel, &endKernel, sizeof(bool), cudaMemcpyHostToDevice, stream);
     cudaStreamSynchronize(stream);
     cudaFree(gpuMetaData);
+    cudaEventDestroy(frameCopyEvent);
     return 0;
 }
