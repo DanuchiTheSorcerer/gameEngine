@@ -1,5 +1,9 @@
 #include "engine.h"
 
+typedef struct interpolator {
+    int tickCount;
+    // Additional game state fields go here.
+} interpolator;
 
 interpolator tickLogic(int tickCount) {
     interpolator result;
