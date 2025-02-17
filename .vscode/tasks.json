@@ -11,6 +11,7 @@
                 "-o", "main.exe",
                 "main.cu",
                 "winlib.cpp",
+                "engine.cu",
                 "-Xcompiler", "/MD",
                 "-Xlinker", "/NODEFAULTLIB:LIBCMT",
                 "-lcudadevrt",

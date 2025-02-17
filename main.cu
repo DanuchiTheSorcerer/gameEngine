@@ -3,6 +3,7 @@
 #include <chrono>
 #include <climits>
 #include "winlib.h"
+#include "engine.h"
 
 int width = 1000;
 int height = 1000;
@@ -15,10 +16,7 @@ cudaEvent_t fpsCopyEvent;
 int frameCounter;
 bool running = true;
 
-struct interpolator {
-    //fully customisable by the person using the engine. Contains all the information needed to compute a frame, minus the interpolation index
-    int tickCount; // example data
-};
+
 
 struct gpuMeta {
     uint32_t* frame; //array of buffers
@@ -77,20 +75,6 @@ void PaintWindow(HDC hdc) {
     StretchDIBits(hdc, 0, 0, width, height, 0, 0, width, height,displayFrame, &bmi,DIB_RGB_COLORS, SRCCOPY);
 }
 
-__global__ void computeFrame(uint32_t* buffer, interpolator* interpolator,int width,int height) { //pointer to buffer
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x >= width || y >= height) return;
-
-    const int idx = y * width + x;
-
-    buffer[idx] = 0xFF000000 | 
-        ((x + interpolator->tickCount*5) % 255) << 16 |
-        ((y + interpolator->tickCount*5) % 255) << 8 |
-        ((x + y + interpolator->tickCount*5) % 255);
-}
-
 __global__ void copyFrameKernel(uint32_t* dst, const uint32_t* src, int totalPixels) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < totalPixels) {
@@ -110,14 +94,11 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
             gpuMetaData->shouldSwitchInterpolator = false;
         }
 
-        // compute a buffer
-        dim3 threadsPerBlock(16, 16);     
-        dim3 numBlocks((width + 15) / 16, (height + 15) / 16);
-
-
 
         // Launch the frame computation
-        computeFrame<<<numBlocks, threadsPerBlock>>>(gpuMetaData->frame,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width, height);
+        computeFrame(gpuMetaData->frame,width, height,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator]);
+
+
         gpuMetaData->framesCalculated = gpuMetaData->framesCalculated + 1;
         //copy frame if needed
         if (gpuMetaData->shouldCopyFrame) {
@@ -162,6 +143,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             std::chrono::duration<float> timeSinceDisplay = now-lastDisplayTime;
             std::chrono::duration<float> timeSinceFpsLog = now - lastFpsLogTime;
 
+            //log fps
             if (timeSinceFpsLog.count() >= 1.0f) {
                 int framesBefore = frameCounter;
                 cudaMemcpyAsync( &frameCounter,&gpuMetaData->framesCalculated,sizeof(int),cudaMemcpyDeviceToHost);
@@ -176,14 +158,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 lastFpsLogTime = now;
             }
             
-            //if it is time for a new tick, than run it
+            //ticks
             if (timeSinceTick.count() > 1.0f/targetTPS) {
-                //game logic
-
-                tickCount++;
-                //update interpolator
-                interpolator newInterpolator;
-                newInterpolator.tickCount = tickCount;
+                interpolator newInterpolator = tickLogic(tickCount++);
 
                 // Determine the inactive interpolator slot.
                 int inactiveIndex = 1 - currentActiveInterpolator;
@@ -213,7 +190,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 lastTickTime = now;
             }
 
-            //if it is time for a new image to be displayed, do so
+            //displays
             if (timeSinceDisplay.count() > 1.0f / refreshRate) {
 
                 //flag GPU to copy
