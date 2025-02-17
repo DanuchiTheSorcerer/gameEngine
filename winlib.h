@@ -9,7 +9,6 @@ extern "C" {
 #include <windows.h>
 
 void PaintWindow(HDC hdc);
-
 // A simple structure to hold our window handle.
 typedef struct WinWindow {
     HWND hwnd;
@@ -45,7 +44,7 @@ void WinLib_DestroyWindow(WinWindow* window);
  * Polls and dispatches pending window messages.
  * This function should be called regularly in your main loop.
  */
-void WinLib_PollEvents(void);
+bool WinLib_PollEvents(MSG* msg);
 
 #ifdef __cplusplus
 }

@@ -87,12 +87,12 @@ void WinLib_DestroyWindow(WinWindow* window) {
     }
 }
 ///////////////////////////////////////////////////////////////////////////////////This is for processing all of the pending events
-void WinLib_PollEvents(void) {
-    MSG msg;
-    // Use PeekMessage in a loop so that this function returns immediately
-    // if there are no messages, allowing it to be called in a non-blocking manner.
-    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+bool WinLib_PollEvents(MSG* msg) {
+    while (PeekMessage(msg, NULL, 0, 0, PM_REMOVE)) {
+        if (msg->message == WM_QUIT)
+            return true; // Signal to exit
+        TranslateMessage(msg);
+        DispatchMessage(msg);
     }
+    return false;
 }

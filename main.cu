@@ -13,6 +13,7 @@ int currentActiveInterpolator = 0; //cpu side
 cudaEvent_t interpolatorCopyEvent;
 cudaEvent_t fpsCopyEvent;
 int frameCounter;
+bool running = true;
 
 struct interpolator {
     //fully customisable by the person using the engine. Contains all the information needed to compute a frame, minus the interpolation index
@@ -99,6 +100,9 @@ __global__ void copyFrameKernel(uint32_t* dst, const uint32_t* src, int totalPix
 
 __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cudaStream_t stream) {
     while(!gpuMetaData->shouldEndKernel) {
+        if (gpuMetaData->shouldEndKernel) {
+            return;
+        }
         //check for new interpolators
 
         if (gpuMetaData->shouldSwitchInterpolator) {
@@ -114,7 +118,6 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
 
         // Launch the frame computation
         computeFrame<<<numBlocks, threadsPerBlock>>>(gpuMetaData->frame,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],width, height);
-
         gpuMetaData->framesCalculated = gpuMetaData->framesCalculated + 1;
         //copy frame if needed
         if (gpuMetaData->shouldCopyFrame) {
@@ -129,7 +132,6 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
             // Once copy is complete, reset the flag.
             gpuMetaData->shouldCopyFrame = false;
         }
-
 
     }
 }
@@ -150,95 +152,92 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     MSG msg;
     //main loop
-    while (true) {
-        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        
-            // Handle WM_QUIT properly
-            if (msg.message == WM_QUIT) {
-                //memory cleanup
-                WinLib_DestroyWindow(window);
-                bool endKernel = true;
-                cudaMemcpyAsync(&gpuMetaData->shouldEndKernel, &endKernel, sizeof(bool), cudaMemcpyHostToDevice, stream);
-                cudaStreamSynchronize(stream);
-                cudaStreamDestroy(stream);
-                cudaFree(gpuMetaData);
-                cudaEventDestroy(interpolatorCopyEvent);
-                cudaEventDestroy(fpsCopyEvent);
-                cudaFreeHost(displayFrame);
-                return 0;
+    while (running) {
+        if (WinLib_PollEvents(&msg)) {
+            running = false;
+        }
+        if (running) {
+            auto now = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<float> timeSinceTick = now-lastTickTime;
+            std::chrono::duration<float> timeSinceDisplay = now-lastDisplayTime;
+            std::chrono::duration<float> timeSinceFpsLog = now - lastFpsLogTime;
+
+            if (timeSinceFpsLog.count() >= 1.0f) {
+                int framesBefore = frameCounter;
+                cudaMemcpyAsync( &frameCounter,&gpuMetaData->framesCalculated,sizeof(int),cudaMemcpyDeviceToHost);
+
+                cudaEventRecord(interpolatorCopyEvent);
+                cudaEventSynchronize(interpolatorCopyEvent); 
+                char buffer[64];
+                sprintf(buffer, "GPU FPS: %d\n", frameCounter-framesBefore);
+                OutputDebugString(buffer);
+
+                // Reset counter and update time;
+                lastFpsLogTime = now;
+            }
+            
+            //if it is time for a new tick, than run it
+            if (timeSinceTick.count() > 1.0f/targetTPS) {
+                //game logic
+
+                tickCount++;
+                //update interpolator
+                interpolator newInterpolator;
+                newInterpolator.tickCount = tickCount;
+
+                // Determine the inactive interpolator slot.
+                int inactiveIndex = 1 - currentActiveInterpolator;
+                
+                // Asynchronously copy the new interpolator data to the inactive slot on the GPU.
+                cudaMemcpyAsync(&gpuMetaData->interpolators[inactiveIndex], &newInterpolator,sizeof(interpolator),cudaMemcpyHostToDevice);
+
+                cudaEventRecord(interpolatorCopyEvent);
+                cudaEventSynchronize(interpolatorCopyEvent);                
+
+                
+                // Set the flag so the GPU will switch to the new interpolator on its next frame.
+                bool switchFlag = true;
+                cudaMemcpyAsync(&gpuMetaData->shouldSwitchInterpolator, &switchFlag , sizeof(bool) , cudaMemcpyHostToDevice);
+                
+                cudaEventRecord(interpolatorCopyEvent);
+                cudaEventSynchronize(interpolatorCopyEvent);    
+                
+
+                // Update our CPU-side record of the active slot.
+                // The GPU will switch to 'inactiveIndex' upon processing the flag.
+                currentActiveInterpolator = inactiveIndex;
+
+                if (tickCount == 1) { // start up the frame calculations after the first interpolator is made
+                    frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream);
+                }
+                lastTickTime = now;
+            }
+
+            //if it is time for a new image to be displayed, do so
+            if (timeSinceDisplay.count() > 1.0f / refreshRate) {
+
+                //flag GPU to copy
+                bool copyFlag = true;
+                cudaMemcpyAsync(&gpuMetaData->shouldCopyFrame,&copyFlag,sizeof(bool),cudaMemcpyHostToDevice);
+
+                InvalidateRect(window->hwnd,NULL,FALSE);
+
+
+                lastDisplayTime = now;
             }
         }
-
-        auto now = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<float> timeSinceTick = now-lastTickTime;
-        std::chrono::duration<float> timeSinceDisplay = now-lastDisplayTime;
-        std::chrono::duration<float> timeSinceFpsLog = now - lastFpsLogTime;
-
-        if (timeSinceFpsLog.count() >= 1.0f) {
-            int framesBefore = frameCounter;
-            cudaMemcpyAsync( &frameCounter,&gpuMetaData->framesCalculated,sizeof(int),cudaMemcpyDeviceToHost);
-
-            cudaEventRecord(interpolatorCopyEvent);
-            cudaEventSynchronize(interpolatorCopyEvent); 
-            char buffer[64];
-            sprintf(buffer, "GPU FPS: %d\n", frameCounter-framesBefore);
-            OutputDebugString(buffer);
-
-            // Reset counter and update time;
-            lastFpsLogTime = now;
-        }
         
-        //if it is time for a new tick, than run it
-        if (timeSinceTick.count() > 1.0f/targetTPS) {
-            //game logic
-
-            tickCount++;
-            //update interpolator
-            interpolator newInterpolator;
-            newInterpolator.tickCount = tickCount;
-
-            // Determine the inactive interpolator slot.
-            int inactiveIndex = 1 - currentActiveInterpolator;
-            
-            // Asynchronously copy the new interpolator data to the inactive slot on the GPU.
-            cudaMemcpyAsync(&gpuMetaData->interpolators[inactiveIndex], &newInterpolator,sizeof(interpolator),cudaMemcpyHostToDevice);
-
-            cudaEventRecord(interpolatorCopyEvent);
-            cudaEventSynchronize(interpolatorCopyEvent);                
-
-            
-            // Set the flag so the GPU will switch to the new interpolator on its next frame.
-            bool switchFlag = true;
-            cudaMemcpyAsync(&gpuMetaData->shouldSwitchInterpolator, &switchFlag , sizeof(bool) , cudaMemcpyHostToDevice);
-            
-            cudaEventRecord(interpolatorCopyEvent);
-            cudaEventSynchronize(interpolatorCopyEvent);    
-            
-
-            // Update our CPU-side record of the active slot.
-            // The GPU will switch to 'inactiveIndex' upon processing the flag.
-            currentActiveInterpolator = inactiveIndex;
-
-            if (tickCount == 1) { // start up the frame calculations after the first interpolator is made
-                frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream);
-            }
-            lastTickTime = now;
-        }
-
-        //if it is time for a new image to be displayed, do so
-        if (timeSinceDisplay.count() > 1.0f / refreshRate) {
-
-            //flag GPU to copy
-            bool copyFlag = true;
-            cudaMemcpyAsync(&gpuMetaData->shouldCopyFrame,&copyFlag,sizeof(bool),cudaMemcpyHostToDevice);
-
-            InvalidateRect(window->hwnd,NULL,FALSE);
-
-
-            lastDisplayTime = now;
-        }
     }
+    WinLib_DestroyWindow(window);
+    bool endKernel = true;
+    cudaMemcpyAsync(&gpuMetaData->shouldEndKernel, &endKernel, sizeof(bool), cudaMemcpyHostToDevice);
+    cudaEventRecord(interpolatorCopyEvent);
+    cudaEventSynchronize(interpolatorCopyEvent);   
+    cudaDeviceSynchronize(); // Wait for ALL GPU work (including kernels) to finish 
+    cudaStreamDestroy(stream);
+    cudaFree(gpuMetaData);
+    cudaEventDestroy(interpolatorCopyEvent);
+    cudaEventDestroy(fpsCopyEvent);
+    cudaFreeHost(displayFrame);
     return 0;
 }
