@@ -24,6 +24,7 @@ struct gpuMeta {
     int activeInterpolator = 0; // index of the current interpolator being used
     uint32_t* pointerToDisplay;
     int framesCalculated;
+    int clockRate;
 
     //flags, set only by the CPU and interpreted by GPU when it has the chance
     bool shouldSwitchInterpolator = false;  // for switching interpolator, set after new one has been copied
@@ -64,10 +65,17 @@ void initAll(HINSTANCE hInstance) {
     cudaHostGetDevicePointer(&deviceDisplayPtr, displayFrame, 0);
     initialData.pointerToDisplay = deviceDisplayPtr; // copy pinter so that the GPU can copy frames to CPU mapped memory
 
+
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    int clockRate = deviceProp.clockRate; // 1 / clockRate = ms per cycle
+    initialData.clockRate = clockRate;
+
     cudaMemcpy(gpuMetaData,&initialData,sizeof(gpuMeta), cudaMemcpyHostToDevice);
 
     cudaEventCreate(&interpolatorCopyEvent);
     cudaEventCreate(&fpsCopyEvent);
+    
 }
 
 void PaintWindow(HDC hdc) {
@@ -82,7 +90,10 @@ __global__ void copyFrameKernel(uint32_t* dst, const uint32_t* src, int totalPix
     }
 }
 
-__global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cudaStream_t stream) {
+__global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cudaStream_t stream,int tps) {
+
+    unsigned long long lastSwapCycle = clock64();
+    
     while(!gpuMetaData->shouldEndKernel) {
         if (gpuMetaData->shouldEndKernel) {
             return;
@@ -92,11 +103,21 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
         if (gpuMetaData->shouldSwitchInterpolator) {
             gpuMetaData->activeInterpolator = 1 - gpuMetaData->activeInterpolator;
             gpuMetaData->shouldSwitchInterpolator = false;
+            lastSwapCycle = clock64();
         }
 
+         // Get the current cycle count.
+         unsigned long long currentCycle = clock64();
+         // Compute the elapsed cycles since the last interpolator swap.
+         unsigned long long elapsedCycles = currentCycle - lastSwapCycle;
+         // Calculate the interpolation factor as a fraction of the 16.67ms period.
+         float interpolationFactor = ((float)elapsedCycles*(float)gpuMetaData->clockRate*(float)tps)/1000;
+         // Clamp the factor to 1.0 to avoid overshooting.
+         if (interpolationFactor > 1.0f)
+             interpolationFactor = 1.0f;
 
         // Launch the frame computation
-        computeFrame(gpuMetaData->frame,width, height,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator]);
+        computeFrame(gpuMetaData->frame,width, height,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],interpolationFactor);
 
 
         gpuMetaData->framesCalculated = gpuMetaData->framesCalculated + 1;
@@ -185,7 +206,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 currentActiveInterpolator = inactiveIndex;
 
                 if (tickCount == 1) { // start up the frame calculations after the first interpolator is made
-                    frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream);
+                    frameComputeLoop<<<1,1,0,stream>>>(gpuMetaData,width,height,stream,targetTPS);
                 }
                 lastTickTime = now;
             }

@@ -2,11 +2,11 @@ Game engine using Win32 and CUDA
 
 For using the engine:
 
-All your code should be in engine.cu
+All your code should be in engine.cu, and engine.h
 engine.cu must include:
 
 1. #include "engine.h"
-2. typedef struct interpolator
+2. typedef struct interpolator (engine.h)
 3. interpolator tickLogic(int tickCount)
 4. __device__ void computeFrame(uint32_t* buffer, int width, int height, const interpolator* interp)
 
