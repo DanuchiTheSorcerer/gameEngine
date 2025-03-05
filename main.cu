@@ -102,6 +102,7 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
 
         if (gpuMetaData->shouldSwitchInterpolator) {
             gpuMetaData->activeInterpolator = 1 - gpuMetaData->activeInterpolator;
+            interpolatorUpdateHandler();
             gpuMetaData->shouldSwitchInterpolator = false;
             lastSwapCycle = clock64();
         }
@@ -118,7 +119,7 @@ __global__ void frameComputeLoop(gpuMeta* gpuMetaData, int width, int height,cud
 
         // Launch the frame computation
         computeFrame(gpuMetaData->frame,width, height,&gpuMetaData->interpolators[gpuMetaData->activeInterpolator],interpolationFactor);
-
+        __nanosleep(25000); // 25 microsecond sleep (note that fps will never exceed 40,000 with this)
 
         gpuMetaData->framesCalculated = gpuMetaData->framesCalculated + 1;
         //copy frame if needed

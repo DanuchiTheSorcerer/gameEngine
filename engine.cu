@@ -38,3 +38,7 @@ __device__ void computeFrame(uint32_t* buffer, int width, int height, const inte
     // Wait for the child kernel to finish before completing.
     __threadfence();
 }
+
+__device__ void interpolatorUpdateHandler() {
+    
+}
